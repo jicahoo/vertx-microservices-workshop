@@ -33,6 +33,13 @@ public class TraderUtils {
     return RANDOM.nextInt(6) + 1;
   }
 
+  /**
+   *
+   * @param company
+   * @param numberOfShares
+   * @param portfolio
+   * @param quote of one company. It may be not the one specified by company parameter.
+   */
   public static void dumbTradingLogic(String company, int numberOfShares, PortfolioService portfolio, JsonObject quote) {
     if (quote.getString("name").equals(company)) {
       if (TraderUtils.timeToSell()) {

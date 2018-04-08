@@ -1,14 +1,21 @@
 package io.vertx.workshop.portfolio.impl;
 
 import io.vertx.core.*;
+import io.vertx.core.buffer.Buffer;
+import io.vertx.core.eventbus.EventBus;
+import io.vertx.core.http.HttpClient;
+import io.vertx.core.json.Json;
 import io.vertx.core.json.JsonObject;
+import io.vertx.ext.web.client.HttpResponse;
 import io.vertx.servicediscovery.ServiceDiscovery;
+import io.vertx.servicediscovery.types.HttpEndpoint;
 import io.vertx.workshop.portfolio.Portfolio;
 import io.vertx.workshop.portfolio.PortfolioService;
 
 import java.io.UnsupportedEncodingException;
 import java.net.URLEncoder;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 import io.vertx.ext.web.client.WebClient;
@@ -32,14 +39,18 @@ public class PortfolioServiceImpl implements PortfolioService {
   public void getPortfolio(Handler<AsyncResult<Portfolio>> resultHandler) {
     // TODO
     // ----
-
+    resultHandler.handle(Future.succeededFuture(portfolio));
     // ----
   }
 
   private void sendActionOnTheEventBus(String action, int amount, JsonObject quote, int newAmount) {
     // TODO
     // ----
-
+    JsonObject msg = new JsonObject();
+    msg.put("action", action).put("quote", quote).put("date", System.currentTimeMillis());
+    msg.put("amount", amount).put("owned", newAmount);
+    EventBus eventBus = vertx.eventBus();
+    eventBus.publish(EVENT_ADDRESS, msg);
     // ----
   }
 
@@ -47,12 +58,24 @@ public class PortfolioServiceImpl implements PortfolioService {
   public void evaluate(Handler<AsyncResult<Double>> resultHandler) {
     // TODO
     // ----
+    HttpEndpoint.getClient(discovery, new JsonObject().put("name", "quotes"),
+            webClientAsyncResult -> {
+              if (webClientAsyncResult.failed()) {
+                resultHandler.handle(Future.failedFuture(webClientAsyncResult.cause()));
+              } else {
+                computeEvaluation(webClientAsyncResult.result(), resultHandler);
+              }
+            }
+            );
 
     // ---
   }
 
-  private void computeEvaluation(WebClient webClient, Handler<AsyncResult<Double>> resultHandler) {
+  private void computeEvaluation(HttpClient webClient, Handler<AsyncResult<Double>> resultHandler) {
     // We need to call the service for each company we own shares
+    Map<String,Integer> shares = portfolio.getShares();
+    shares.entrySet().forEach(x -> System.out.println("shares: " + x.getKey() + ", " + x.getValue()));
+
     List<Future> results = portfolio.getShares().entrySet().stream()
         .map(entry -> getValueForCompany(webClient, entry.getKey(), entry.getValue()))
         .collect(Collectors.toList());
@@ -61,18 +84,43 @@ public class PortfolioServiceImpl implements PortfolioService {
     // is called when all the futures has been assigned.
     CompositeFuture.all(results).setHandler(
         ar -> {
-          double sum = results.stream().mapToDouble(fut -> (double) fut.result()).sum();
-          resultHandler.handle(Future.succeededFuture(sum));
+          if (results.stream().anyMatch(Future::failed)) {
+            results.stream().filter(Future::failed).forEach(x -> x.cause().printStackTrace());
+          } else {
+            results.forEach(x -> System.out.println(x.result()));
+            double sum = results.stream().mapToDouble(fut -> (double) fut.result()).sum();
+            resultHandler.handle(Future.succeededFuture(sum));
+          }
         });
   }
 
-  private Future<Double> getValueForCompany(WebClient client, String company, int numberOfShares) {
+  private Future<Double> getValueForCompany(HttpClient client, String company, int numberOfShares) {
     // Create the future object that will  get the value once the value have been retrieved
     Future<Double> future = Future.future();
 
     //TODO
     //----
 
+    client.get("?name="+encode(company), resp -> {
+      //Handle the exception when reading response.
+      resp.exceptionHandler(future::fail);
+      if (resp.statusCode() == 200) {
+        System.out.println("200 OK: " + resp.statusCode());
+        resp.bodyHandler(buff -> {
+          JsonObject jsonObject = buff.toJsonObject();
+          System.out.println(jsonObject);
+          double bidVal = jsonObject.getDouble("bid");
+          System.out.println("bid: " + bidVal);
+          System.out.println(jsonObject);
+          future.complete(numberOfShares * jsonObject.getDouble("bid"));
+        }).exceptionHandler(future::fail);
+      } else {
+        System.out.println("Status Code: " + resp.statusCode());
+        future.complete(0.0);
+      }
+      //Good question: should future.result() return null or correct double value?
+      System.out.println("Jichao: Got bid for company: " + company + " - " + future.isComplete() +  " - " + future.result());
+    }).exceptionHandler(future::fail).end(); //In call-back style, you have to register the exception handler.
     // ---
 
     return future;
@@ -149,5 +197,7 @@ public class PortfolioServiceImpl implements PortfolioService {
     }
   }
 
+  public static void main(final String[] args) {
+  }
 
 }

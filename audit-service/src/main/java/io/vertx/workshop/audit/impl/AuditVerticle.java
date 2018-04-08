@@ -4,6 +4,7 @@ import io.vertx.core.Future;
 import io.vertx.core.json.Json;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
+import io.vertx.ext.sql.ResultSet;
 import io.vertx.ext.sql.UpdateResult;
 import io.vertx.rxjava.core.eventbus.MessageConsumer;
 import io.vertx.rxjava.core.http.HttpServer;
@@ -11,6 +12,7 @@ import io.vertx.rxjava.ext.jdbc.JDBCClient;
 import io.vertx.rxjava.ext.sql.SQLConnection;
 import io.vertx.rxjava.ext.web.Router;
 import io.vertx.rxjava.ext.web.RoutingContext;
+import io.vertx.rxjava.servicediscovery.types.HttpEndpoint;
 import io.vertx.rxjava.servicediscovery.types.MessageSource;
 import io.vertx.workshop.common.RxMicroServiceVerticle;
 import rx.Single;
@@ -43,11 +45,30 @@ public class AuditVerticle extends RxMicroServiceVerticle {
     super.start();
 
     // creates the jdbc client.
+    System.out.println("Start get JDBC");
     jdbc = JDBCClient.createNonShared(vertx, config());
+    System.out.println("Get JDBC successfully.");
 
     // TODO
     // ----
-    Single<MessageConsumer<JsonObject>> readySingle = Single.error(new UnsupportedOperationException("not yet implemented"));
+    /*My first solution
+    Single<MessageConsumer<JsonObject>> readySingle = Single.zip(initializeDatabase(true), configureTheHTTPServer(),
+            retrieveThePortfolioMessageSource(),
+            (s1, s2, s3) -> s3
+            ).doOnError(future::fail);
+            */
+    Single<Void> databaseReady = initializeDatabase(config().getBoolean("drop", false));
+    Single<Void> httpEndpointReady = configureTheHTTPServer()
+            .doOnError(e -> System.out.println("Jichao Error: " + e.getMessage()))
+            .flatMap(server -> rxPublishHttpEndpoint("audit", "localhost", server.actualPort())); //flatMap is async
+    httpEndpointReady.doOnError(x -> System.out.println("Http server failed:" + x.getMessage()));
+    Single<MessageConsumer<JsonObject>> messageConsumerReady = retrieveThePortfolioMessageSource();
+    Single<MessageConsumer<JsonObject>> readySingle = Single.zip(databaseReady, httpEndpointReady, messageConsumerReady,
+            (s1,s2,s3) -> {
+
+                return s3;
+    }
+            );
     // ----
 
     readySingle.doOnSuccess(consumer -> {
@@ -78,6 +99,51 @@ public class AuditVerticle extends RxMicroServiceVerticle {
 
     //TODO
     // ----
+    /* My solution
+    jdbc.getConnection(
+            ar -> {
+              if (ar.succeeded()) {
+                SQLConnection conn = ar.result();
+                conn.query(SELECT_STATEMENT, queryResult -> {
+                  if(queryResult.succeeded()) {
+                    ResultSet resultSet = queryResult.result();
+                    JsonArray respBody = new JsonArray();
+                    resultSet.getRows().forEach( row -> {
+                      JsonObject op = row.getJsonObject("operation");
+                      respBody.add(op);
+                    }
+                    );
+                    context.response().end(respBody.toString());
+
+                  }
+                }).close();
+
+              } else {
+                context.response().setStatusCode(500).end("500 error");
+              }
+            }
+    );*/
+    jdbc.getConnection(ar -> {
+      SQLConnection conn = ar.result();
+      if (ar.failed()) {
+        context.fail(ar.cause());
+      } else {
+        conn.query(SELECT_STATEMENT, result -> {
+          ResultSet resultSet = result.result();
+          List<JsonObject> operations = resultSet.getRows().stream()
+                  .map(row -> {
+                    System.out.println("get row: " + row);
+                    //!!! Capitalize OPERATION
+                    return new JsonObject(row.getString("OPERATION"));
+                  })
+                  .collect(Collectors.toList());
+
+          context.response().setStatusCode(200).end(Json.encodePrettily(operations));
+          conn.close();
+        });
+      }
+
+    });
 
     // ----
   }
@@ -86,10 +152,20 @@ public class AuditVerticle extends RxMicroServiceVerticle {
 
     //TODO
     //----
-    Single<HttpServer> httpServerSingle = Single.error(new UnsupportedOperationException("not yet implemented"));
+    /* My solution
+    Router router = Router.router(vertx);
+    router.route("/").handler(this::retrieveOperations); //Note route. get("/")
+    HttpServer httpServer = vertx.createHttpServer();
+    httpServer.requestHandler(router::accept);
+    Single<HttpServer> httpServerSingle =  httpServer.rxListen(config().getInteger("port", 0));
+    */
+    Router router = Router.router(vertx);  //router is from vertx, not http server. But Router is still from web ext
+    router.get("/").handler(this::retrieveOperations);
+    return vertx.createHttpServer()
+            .requestHandler(router::accept)
+            .rxListen(config().getInteger("port", 0));
     //----
 
-    return httpServerSingle;
   }
 
   private Single<MessageConsumer<JsonObject>> retrieveThePortfolioMessageSource() {
@@ -104,6 +180,7 @@ public class AuditVerticle extends RxMicroServiceVerticle {
     // 3. close the connection
 
     // Step 1 get the connection
+    System.out.println("Got operation from trader: " + operation.toString());
     Single<SQLConnection> connectionRetrieved = jdbc.rxGetConnection();
 
     // Step 2, when the connection is retrieved (this may have failed), do the insertion (upon success)
@@ -134,12 +211,14 @@ public class AuditVerticle extends RxMicroServiceVerticle {
     // This is the starting point of our Rx operations
     // This single will be completed when the connection with the database is established.
     // We are going to use this single as a reference on the connection to close it.
+    System.out.println("Enter initialize Database.");
     Single<SQLConnection> connectionRetrieved = jdbc.rxGetConnection();
 
     // Ok, now it's time to chain all these actions:
     Single<List<Integer>> resultSingle = connectionRetrieved
         .flatMap(conn -> {
           // When the connection is retrieved
+          System.out.println("Got connection when init database");
 
           // Prepare the batch
           List<String> batch = new ArrayList<>();
